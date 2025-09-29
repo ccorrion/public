@@ -2,6 +2,22 @@ $rootPages = @("https://support.microsoft.com/en-us/topic/windows-10-update-hist
                "https://aka.ms/Windows11UpdateHistory",
                "https://support.microsoft.com/en-us/topic/windows-server-2022-update-history-e1caa597-00c5-4ab9-9f3e-8212fe80b2ee")
 
+$releaseInfoUrl = "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information"
+
+function Get-InnerText {
+    param(
+        [string]$Html
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Html)) {
+        return ""
+    }
+
+    $text = [regex]::Replace($Html, '(?is)<script.*?</script>|<style.*?</style>', '')
+    $text = [regex]::Replace($text, '(?is)<.*?>', '')
+    return [System.Web.HttpUtility]::HtmlDecode($text).Trim()
+}
+
 $d4nData = Invoke-WebRequest "https://raw.datafornerds.io/ms/mswin/buildnumbers.json" | Select-Object -ExpandProperty Content | ConvertFrom-Json
 
 $patchList = New-Object System.Collections.ArrayList
@@ -65,6 +81,95 @@ foreach ($sourceURL in $rootPages) {
 
 }
 
+$releaseInfoResponse = Invoke-WebRequest $releaseInfoUrl -UseBasicParsing
+
+if ($releaseInfoResponse.StatusCode -ne 200) {
+    Throw "Error $($releaseInfoResponse.StatusCode) Getting Release Info Data"
+}
+
+$releaseContent = $releaseInfoResponse.Content
+$releaseSectionRegex = [regex]::new('(?s)<details>\s*<summary>\s*<strong>Version (?<VersionLabel>[^<]*?) \(OS build (?<BaseBuild>\d+)\)</strong>(?<Status>.*?)</summary>(?<Body>.*?)</details>')
+$tableRegex = [regex]::new('(?s)<table[^>]*>(?<Table>.*?)</table>')
+$rowRegex = [regex]::new('(?s)<tr>(?<Row>.*?)</tr>')
+$cellRegex = [regex]::new('(?s)<t[dh][^>]*>(?<Cell>.*?)</t[dh]>')
+$invariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+
+$releaseSectionRegex.Matches($releaseContent).ForEach({
+    $bodyContent = $_.Groups['Body'].Valuerem
+    $tableMatch = $tableRegex.Match($bodyContent)
+
+    if (-not $tableMatch.Success) {
+        return
+    }
+
+    $rows = $rowRegex.Matches($tableMatch.Groups['Table'].Value)
+
+    for ($i = 1; $i -lt $rows.Count; $i++) {
+        $row = $rows[$i].Groups['Row'].Value
+        $cells = $cellRegex.Matches($row)
+
+        if ($cells.Count -lt 5) {
+            continue
+        }
+
+        $servicingOption = Get-InnerText $cells[0].Groups['Cell'].Value
+        $updateType = Get-InnerText $cells[1].Groups['Cell'].Value
+        $availabilityRaw = Get-InnerText $cells[2].Groups['Cell'].Value
+        $buildNumber = Get-InnerText $cells[3].Groups['Cell'].Value
+        $kbArticle = Get-InnerText $cells[4].Groups['Cell'].Value
+
+        if ([string]::IsNullOrWhiteSpace($buildNumber)) {
+            continue
+        }
+
+        try {
+            $releaseDate = [datetime]::ParseExact($availabilityRaw, 'yyyy-MM-dd', $invariantCulture)
+        } catch {
+            continue
+        }
+
+        $releaseDateString = $releaseDate.ToString('yyyy-MM-dd')
+        $displayDate = $releaseDate.ToString('MMMM d, yyyy', $invariantCulture)
+
+        $kbTitle = if ([string]::IsNullOrWhiteSpace($kbArticle)) {
+            "$displayDate — OS Build $buildNumber"
+        } else {
+            "$displayDate — $kbArticle (OS Build $buildNumber)"
+        }
+
+        $patchList.Add(
+            [PSCustomObject]@{
+                "Win10Version" = "10.0.$buildNumber"
+                "Version" = $buildNumber
+                "ReleaseDate" = $releaseDateString
+                "Article" = $kbArticle
+                "KBTitle" = $kbTitle
+                "LTSCOnly" = ($servicingOption -match 'LTSC')
+                "Comment" = $updateType
+            }
+        ) | Out-Null
+    }
+})
+
+$patchList = $patchList | ForEach-Object {
+    if ($_.KBTitle) {
+        $_.KBTitle = ($_.KBTitle -replace '—\s*', '— ').Trim()
+    }
+
+    if ($_.Comment) {
+        $_.Comment = $_.Comment.Trim()
+    } else {
+        $_.Comment = ""
+    }
+
+    $_
+}
+
+$patchList = $patchList | Sort-Object ReleaseDate, Version
+$patchList = $patchList | Group-Object Win10Version | ForEach-Object {
+    $_.Group | Sort-Object ReleaseDate -Descending | Select-Object -First 1
+}
+
 $patchList = $patchList | Sort-Object ReleaseDate | Select-Object Win10Version,Version,ReleaseDate,Article,KBTitle,LTSCOnly,Comment -Unique
 
 # Manual Updates to List
@@ -75,7 +180,7 @@ $patchList | Where-Object { $_.Win10Version -like "10.0.17763.*" -and (Get-Date 
 $outputData = [PSCustomObject]@{
     "DataForNerds"=[PSCustomObject]@{
         "LastUpdatedUTC" = (Get-Date).ToUniversalTime()
-        "SourceList" = "https://aka.ms/WindowsUpdateHistory","https://aka.ms/Windows11UpdateHistory","https://support.microsoft.com/en-us/topic/windows-server-2022-update-history-e1caa597-00c5-4ab9-9f3e-8212fe80b2ee"
+        "SourceList" = "https://aka.ms/WindowsUpdateHistory","https://aka.ms/Windows11UpdateHistory","https://support.microsoft.com/en-us/topic/windows-server-2022-update-history-e1caa597-00c5-4ab9-9f3e-8212fe80b2ee",$releaseInfoUrl
     }
     "Data" = $patchList
 }
