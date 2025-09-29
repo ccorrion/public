@@ -153,7 +153,7 @@ $releaseSectionRegex.Matches($releaseContent).ForEach({
 
 $patchList = $patchList | ForEach-Object {
     if ($_.KBTitle) {
-        $_.KBTitle = ($_.KBTitle -replace '—\s*', '— ').Trim()
+        $_.KBTitle = ($_.KBTitle -replace '—\s*', '—').Trim()
     }
 
     if ($_.Comment) {
